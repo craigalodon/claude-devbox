@@ -21,8 +21,9 @@ From the outside in:
      not possible.
    - Optional SSH hardening: key-only login, no root, and only these two users allowed.
 2. **Rootless podman container** (`dev/sandbox/Containerfile`).
-   - The only host paths it sees are the project (`/workspace`) and a few persistent dirs under
-     `~SANDBOX_USER/sandbox/`: Claude's config, shell history, `gh` login, build caches and Bitbucket tokens.
+   - The only host paths it sees are the project (`/workspace`), **that project's own** state dir under
+     `~SANDBOX_USER/sandbox/projects/`, and the read-only global Claude config. See
+     [Project isolation](#project-isolation).
 3. **Egress firewall inside the container** (`dev/sandbox/init-firewall.sh`):
    - Outbound traffic is default-deny.
    - A local dnsmasq is the only resolver. For every allowlisted name, it adds the IPs it returns to an ipset.
@@ -31,10 +32,12 @@ From the outside in:
    - IPv6 is dropped entirely and the LAN is unreachable.
    - It runs a self-test on every start. `entrypoint.sh` then drops `NET_ADMIN`/`NET_RAW` before starting your
      command, so nothing inside can undo the rules.
-4. **Claude Code's own sandbox** (`dev/sandbox/claude-home/settings.json` → `sandbox.*`).
+4. **Claude Code's own sandbox** (`sandbox.*` in `dev/sandbox/global/managed-settings.json`).
    - Bash commands run in bubblewrap with a second, strict domain allowlist, limited write paths, and Claude's
      own credentials file unreadable.
    - Unsandboxed commands are disabled.
+   - These are *managed* settings, which take precedence over anything a session could write to its own
+     settings files, so the sandboxed Claude can't loosen them.
 
 `claude-dev up` starts a Remote Control server with `--permission-mode acceptEdits --spawn=worktree --sandbox`.
 File edits are auto-accepted, anything else still asks, and each remote session gets its own git worktree.
@@ -51,8 +54,11 @@ prompt-injected it) doing damage outside its project, including:
 **What it does not protect against:**
 - **Exfiltration through allowlisted services.** github.com, npm, PyPI and friends accept uploads, and the sandbox
   can push to any repo its token allows. Use fine-grained, single-repo tokens, and add domains sparingly.
-- **The sandbox's own credentials.** The sandboxed Claude can read its GitHub token (`gh-config`) and Bitbucket
-  tokens. That's inherent, since it needs them to push. Scope them to the repos you run in the sandbox.
+- **The sandbox's own credentials.** The sandboxed Claude can read its project's GitHub token and Bitbucket
+  token. That's inherent, since it needs them to push. Scope each token to that project's repo. Other projects'
+  tokens are never mounted.
+- **Anything shared on purpose.** All projects share the image, the global Claude config, the git identity and
+  your claude.ai account.
 - **Your claude.ai account.** Remote Control means anyone who controls your claude.ai account can run code in
   the sandbox. Protect that account accordingly.
 - **Damage inside the project.** With `acceptEdits`, Claude edits the mounted project directly (in worktrees). Keep
@@ -76,12 +82,11 @@ sudo ./install-host.sh --check    # see what would change
 sudo ./install-host.sh            # packages, sandbox user, sudoers, sshd, modules
 ./install-dev.sh                  # deploy the sandbox user's files and build the image
 
-cd / && sudo -u dev -H ~dev/.local/bin/claude-dev login       # one-time claude.ai login
 cd / && sudo -u dev -H ~dev/.local/bin/claude-dev up /home/dev/myproject
 ```
 
-The session appears at claude.ai/code within a few seconds. The first `up` for a project asks you to accept
-the workspace trust dialog once.
+The first `up` for a project opens Claude interactively once, to `/login` to claude.ai and accept the
+workspace trust dialog. After that, the session appears at claude.ai/code within a few seconds.
 
 ## Commands
 
@@ -89,9 +94,11 @@ the workspace trust dialog once.
 
 ```bash
 claude-dev build                       # (re)build the image
-claude-dev login                       # one-time claude.ai login
-claude-dev up <project-dir> [name]     # Remote Control session in a tmux session
-claude-dev shell <project-dir>         # interactive shell in the sandbox
+claude-dev up <project-dir> [name]     # Remote Control session in a tmux session (first run: /login + trust)
+claude-dev login <project-dir>         # sign in to claude.ai again for one project
+claude-dev shell <project-dir>         # interactive shell in the project's sandbox
+claude-dev state <project-dir>         # create/print the project's state dir (works before the dir exists)
+claude-dev forget <project-dir>        # delete a project's state: login, transcripts, tokens, caches
 claude-dev ls | attach <name> | down <name>
 ```
 
@@ -110,13 +117,42 @@ From your admin login: `cd /` first (the sandbox user can't enter your home), th
 These live only on the box and are **never** in the repo. `.gitignore` and `scripts/check-secrets.sh` guard
 against it:
 
-| Path under `~SANDBOX_USER/sandbox/` | What it holds |
+| Path under `~SANDBOX_USER/sandbox/projects/<key>/` | What it holds |
 |---|---|
-| `bb-credentials/credentials` | Bitbucket repo tokens |
-| `gh-config/` | the `gh` login |
-| `claude-home/.credentials.json` | the claude.ai login |
-| `claude-home/.claude.json` | Claude Code state |
-| `history/`, `cache/`, `uv-share/`, `go/` | shell history and persistent caches |
+| `bb-credentials/credentials` | this project's Bitbucket token |
+| `gh-config/` | this project's `gh` login |
+| `claude-home/.credentials.json` | this project's claude.ai login |
+| `claude-home/` (rest) | Claude Code state: transcripts, auto-memory, trust, per-project settings |
+| `history/`, `cache/`, `uv-share/`, `go/` | shell history and build caches |
+
+## Project isolation
+
+Each project has its own state dir, `~SANDBOX_USER/sandbox/projects/<key>/`. `<key>` is the project's path with
+`/` turned into `-`, e.g. `home-dev-myproject`. A sandbox mounts only its own project's dir, so projects can't:
+- read each other's transcripts or auto-memory
+- use each other's GitHub or Bitbucket tokens
+- plant code in each other's caches, such as pre-commit hook environments, virtualenvs or Go modules
+
+The cost is a one-time `/login` per project and a separate download cache per project.
+
+**Global config, shared read-only.** `~SANDBOX_USER/sandbox/global/` is mounted at `/etc/claude-code`, Claude
+Code's managed-policy location:
+- `managed-settings.json` holds the sandbox rules, attribution, plugins and anything else that should apply
+  everywhere. It's rendered from `dev/sandbox/global/managed-settings.json` plus `local/claude-settings.json`.
+- `CLAUDE.md` holds instructions for every project. It's rendered from `dev/sandbox/global/CLAUDE.md` plus
+  `local/CLAUDE.md`.
+
+For example, the base config sets `attribution` to empty strings, so no project adds Claude co-author trailers
+or PR attribution lines. Per-project choices, such as a project's own `/config` changes, still go to that
+project's `claude-home/settings.json`.
+
+**Upgrading from the earlier shared layout.** Before project isolation, the state lived directly in
+`~SANDBOX_USER/sandbox/{claude-home,gh-config,bb-credentials,history,cache,uv-share,go}` and was shared by every
+project. `install-dev.sh` warns while those dirs exist. `claude-dev` no longer mounts them.
+1. Stop the sandboxes.
+2. Move each project's Bitbucket token line into its own `$(claude-dev state <project-dir>)/bb-credentials/credentials`.
+3. Archive or delete the old dirs.
+4. `claude-dev up` each project again. Its first run asks for `/login`.
 
 ## Changing things
 
@@ -127,8 +163,9 @@ Edit the repo (or `devbox.conf` / `local/`), then deploy:
 sudo ./install-host.sh --check && sudo ./install-host.sh
 ```
 
-- **`--check` exits 1 on drift.** Use it to spot changes made in place. For example, Claude Code rewrites its
-  `settings.json` when you use `/plugin` or `/config`. Port such changes into the repo or `local/claude-settings.json`.
+- **`--check` exits 1 on drift.** Use it to spot changes made in place to the deployed files. The global config
+  is read-only inside sandboxes, so `/plugin` or `/config` changes land in the project's own settings instead.
+  Port any you want everywhere into the repo or `local/claude-settings.json`.
 - **`--render <dir>`** writes the rendered files to `<dir>` without touching anything live.
 - **`install-host.sh` checks before it installs.** Sudoers must pass `visudo -c` before it's installed. The sshd
   config is rolled back if `sshd -t` fails, so a bad edit can't lock you out.
@@ -138,7 +175,8 @@ sudo ./install-host.sh --check && sudo ./install-host.sh
 
 A domain must be allowed in **both** layers:
 - the image firewall: `ALLOW_DOMAINS` in `dev/sandbox/init-firewall.sh`, or `EXTRA_DOMAINS` in `devbox.conf`
-- Claude's sandbox: `sandbox.network.allowedDomains` in `settings.json`, or in `local/claude-settings.json`
+- Claude's sandbox: `sandbox.network.allowedDomains` in `dev/sandbox/global/managed-settings.json`, or in
+  `local/claude-settings.json`
 
 Then run `./install-dev.sh`, which rebuilds the image.
 
@@ -146,8 +184,10 @@ Then run `./install-dev.sh`, which rebuilds the image.
 
 ### GitHub
 
-Run `gh auth login` inside `claude-dev shell` with a **fine-grained PAT** limited to the repos you'll work on.
-The login persists in `gh-config/`, and git uses `gh auth git-credential`. Clone over HTTPS.
+Each project has its own `gh` login. Run `gh auth login` inside `claude-dev shell <project-dir>` with a
+**fine-grained PAT** limited to that project's repo: Contents read/write, plus Pull requests and, if needed,
+Workflows. The login persists in the project's `gh-config/`, and git uses `gh auth git-credential`. Clone over
+HTTPS.
 
 Deploy keys don't fit this setup: GitHub lets a given deploy key be used on only one repo.
 
@@ -159,7 +199,12 @@ Bitbucket has no `gh`. This setup uses per-repo **repository access tokens** and
    Repositories Read+Write, plus Pull requests Read+Write if you want PRs.
    - Repository access tokens start with `ATCTT3`.
    - Atlassian account API tokens (starting `ATATT3`) won't work with this setup.
-2. **Add one line per repo** to `~SANDBOX_USER/sandbox/bb-credentials/credentials` (mode 600):
+2. **Add the token line** to the project's own credentials file. `claude-dev state` creates the state dir
+   even before the clone exists:
+   ```bash
+   cd / && sudo -u dev -H ~dev/.local/bin/claude-dev state ~dev/<repo>    # prints …/projects/home-dev-<repo>
+   ```
+   Then add this line to `<that dir>/bb-credentials/credentials` (mode 600):
    ```
    https://x-token-auth:<TOKEN>@bitbucket.org/<workspace>/<repo>.git
    ```
@@ -171,7 +216,7 @@ Bitbucket has no `gh`. This setup uses per-repo **repository access tokens** and
    ```bash
    cd / && sudo -u dev -H git \
      -c 'credential.https://bitbucket.org.helper=' \
-     -c 'credential.https://bitbucket.org.helper=!f() { test "$1" = get && git credential-store --file ~dev/sandbox/bb-credentials/credentials get; }; f' \
+     -c 'credential.https://bitbucket.org.helper=!f() { test "$1" = get && git credential-store --file ~dev/sandbox/projects/home-dev-<repo>/bb-credentials/credentials get; }; f' \
      clone https://bitbucket.org/<workspace>/<repo>.git ~dev/<repo>
    ```
    **Never use plain `store` here.** On an auth failure, git tells the helper to *erase* the credential, and
@@ -183,7 +228,7 @@ Test a token without printing it. `200` works, `401` means a bad token, `403` a 
 workspace/repo or a token made for another repo:
 
 ```bash
-cd / && sudo -u dev bash -c 'tok=$(sed -E "s|.*x-token-auth:([^@]+)@.*|\1|" ~/sandbox/bb-credentials/credentials); curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $tok" https://api.bitbucket.org/2.0/repositories/<workspace>/<repo>'
+cd / && sudo -u dev bash -c 'tok=$(sed -E "s|.*x-token-auth:([^@]+)@.*|\1|" ~/sandbox/projects/home-dev-<repo>/bb-credentials/credentials); curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $tok" https://api.bitbucket.org/2.0/repositories/<workspace>/<repo>'
 ```
 
 ## Gotchas
