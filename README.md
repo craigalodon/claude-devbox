@@ -127,8 +127,9 @@ against it:
 
 ## Project isolation
 
-Each project has its own state dir, `~SANDBOX_USER/sandbox/projects/<key>/`. `<key>` is the project's path with
-`/` turned into `-`, e.g. `home-dev-myproject`. A sandbox mounts only its own project's dir, so projects can't:
+Each project has its own state dir, `~SANDBOX_USER/sandbox/projects/<key>/`. `<key>` is the project's folder
+name plus a short hash of its full path, e.g. `myproject-1a2b3c4d`, so two folders with the same name never
+share state. `claude-dev state <project-dir>` prints it. A sandbox mounts only its own project's dir, so projects can't:
 - read each other's transcripts or auto-memory
 - use each other's GitHub or Bitbucket tokens
 - plant code in each other's caches, such as pre-commit hook environments, virtualenvs or Go modules
@@ -202,7 +203,7 @@ Bitbucket has no `gh`. This setup uses per-repo **repository access tokens** and
 2. **Add the token line** to the project's own credentials file. `claude-dev state` creates the state dir
    even before the clone exists:
    ```bash
-   cd / && sudo -u dev -H ~dev/.local/bin/claude-dev state ~dev/<repo>    # prints …/projects/home-dev-<repo>
+   cd / && sudo -u dev -H ~dev/.local/bin/claude-dev state ~dev/<repo>    # prints …/projects/<repo>-<hash> — that is <key>
    ```
    Then add this line to `<that dir>/bb-credentials/credentials` (mode 600):
    ```
@@ -216,7 +217,7 @@ Bitbucket has no `gh`. This setup uses per-repo **repository access tokens** and
    ```bash
    cd / && sudo -u dev -H git \
      -c 'credential.https://bitbucket.org.helper=' \
-     -c 'credential.https://bitbucket.org.helper=!f() { test "$1" = get && git credential-store --file ~dev/sandbox/projects/home-dev-<repo>/bb-credentials/credentials get; }; f' \
+     -c 'credential.https://bitbucket.org.helper=!f() { test "$1" = get && git credential-store --file ~dev/sandbox/projects/<key>/bb-credentials/credentials get; }; f' \
      clone https://bitbucket.org/<workspace>/<repo>.git ~dev/<repo>
    ```
    **Never use plain `store` here.** On an auth failure, git tells the helper to *erase* the credential, and
@@ -228,7 +229,7 @@ Test a token without printing it. `200` works, `401` means a bad token, `403` a 
 workspace/repo or a token made for another repo:
 
 ```bash
-cd / && sudo -u dev bash -c 'tok=$(sed -E "s|.*x-token-auth:([^@]+)@.*|\1|" ~/sandbox/projects/home-dev-<repo>/bb-credentials/credentials); curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $tok" https://api.bitbucket.org/2.0/repositories/<workspace>/<repo>'
+cd / && sudo -u dev bash -c 'tok=$(sed -E "s|.*x-token-auth:([^@]+)@.*|\1|" ~/sandbox/projects/<key>/bb-credentials/credentials); curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $tok" https://api.bitbucket.org/2.0/repositories/<workspace>/<repo>'
 ```
 
 ## Gotchas

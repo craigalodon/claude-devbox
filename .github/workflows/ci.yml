@@ -63,7 +63,8 @@ jobs:
       # is reachable or allowlisted hosts aren't), then drops capabilities and runs the checks below.
       - name: firewall and tooling smoke test
         run: |
-          podman run --rm --cap-add NET_ADMIN --cap-add NET_RAW \
+          # same user mapping as claude-dev, so node owns the mounted dir and only :ro stops writes
+          podman run --rm --userns=keep-id:uid=1000,gid=1000 --cap-add NET_ADMIN --cap-add NET_RAW \
             -v "$RUNNER_TEMP/dev/sandbox/global":/etc/claude-code:ro \
             claude-sandbox bash -euo pipefail -c '
             test "$(grep CapEff /proc/self/status | cut -f2)" = 0000000000000000 || { echo "capabilities not dropped"; exit 1; }
@@ -77,5 +78,6 @@ jobs:
             ruff --version
             command -v bb pre-commit ty rumdl
             test -s /etc/claude-code/managed-settings.json
+            awk '"'"'$2=="/etc/claude-code"{print $4}'"'"' /proc/mounts | grep -qE "(^|,)ro(,|$)" || { echo "global config not mounted ro"; exit 1; }
             if touch /etc/claude-code/probe 2>/dev/null; then echo "global config is writable"; exit 1; fi
           '

@@ -30,9 +30,15 @@ usage() { sed -n '2,21p' "$0"; exit 1; }
 die() { echo "claude-dev: $*" >&2; exit 1; }
 
 project_path() { [ -d "${1:-}" ] || die "not a directory: ${1:-(none)}"; realpath "$1"; }
-# /home/dev/data-analytics -> home-dev-data-analytics (unique per path, readable)
-project_key() { local k="${1#/}"; echo "${k//[^A-Za-z0-9._-]/-}"; }
-state_dir() { echo "$SANDBOX_DIR/projects/$(project_key "$1")"; }
+# /home/dev/data-analytics -> data-analytics-<8 hex of sha256(path)>: readable, and distinct paths get
+# distinct keys (a plain '/'->'-' mapping would merge /a/foo-bar and /a/foo/bar into one project's state)
+project_key() {
+  local p="$1" base
+  [ -n "$p" ] && [ "$p" != / ] || die "refusing to use / as a project"
+  base=$(basename "$p"); base=${base//[^A-Za-z0-9._-]/-}
+  echo "$base-$(printf '%s' "$p" | sha256sum | cut -c1-8)"
+}
+state_dir() { local k; k=$(project_key "$1") || exit 1; echo "$SANDBOX_DIR/projects/$k"; }
 
 ensure_state() {  # ensure_state <project-path>
   local s; s=$(state_dir "$1")
@@ -118,6 +124,8 @@ case "$cmd" in
     [ -n "${1:-}" ] || die "project dir required"
     if [ -d "$1" ]; then s=$(state_dir "$(realpath "$1")"); else s=$(state_dir "$(realpath -m "$1")"); fi
     [ -d "$s" ] || die "no state for $1 ($s)"
+    # only ever a single project's own dir, never projects/ itself or anything outside it
+    [ "$(dirname "$s")" = "$SANDBOX_DIR/projects" ] && [ "$(basename "$s")" != projects ] || die "refusing to delete $s"
     du -sh "$s"; read -r -p "Delete all sandbox state for $1 (login, transcripts, tokens, caches)? [y/N] " ok
     [ "$ok" = y ] || { echo "kept"; exit 0; }
     podman unshare rm -rf "$s"; echo "deleted $s" ;;
