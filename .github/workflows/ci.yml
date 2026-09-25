@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly: the image pulls the current base image and the latest Claude Code, Go, uv and gh at
+    # build time, so it can break without any commit here.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck --severity=warning -x \
+            install-dev.sh install-host.sh lib/common.sh scripts/check-secrets.sh \
+            dev/bin/claude-dev dev/sandbox/init-firewall.sh dev/sandbox/entrypoint.sh dev/sandbox/bb
+
+      - name: secret check
+        run: scripts/check-secrets.sh
+
+      - name: render with the example config
+        run: |
+          cp devbox.conf.example devbox.conf
+          ./install-dev.sh --render "$RUNNER_TEMP/dev"
+          ./install-host.sh --render "$RUNNER_TEMP/host"
+          find "$RUNNER_TEMP/dev" "$RUNNER_TEMP/host" -type f | sort
+          if grep -rnE '@[A-Z_]+@' "$RUNNER_TEMP/dev" "$RUNNER_TEMP/host"; then
+            echo "unrendered placeholders"; exit 1
+          fi
+          python3 -m json.tool "$RUNNER_TEMP/dev/sandbox/claude-home/settings.json" > /dev/null
+          for f in "$RUNNER_TEMP"/host/etc/sudoers.d/*; do sudo visudo -cf "$f"; done
+
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: render build context
+        run: |
+          cp devbox.conf.example devbox.conf
+          ./install-dev.sh --render "$RUNNER_TEMP/dev"
+
+      - name: build image
+        run: podman build --pull=always -t claude-sandbox "$RUNNER_TEMP/dev/sandbox"
+
+      # The entrypoint brings the firewall up and runs its self-test (fails the step if example.com
+      # is reachable or allowlisted hosts aren't), then drops capabilities and runs the checks below.
+      - name: firewall and tooling smoke test
+        run: |
+          podman run --rm --cap-add NET_ADMIN --cap-add NET_RAW claude-sandbox bash -euo pipefail -c '
+            test "$(grep CapEff /proc/self/status | cut -f2)" = 0000000000000000 || { echo "capabilities not dropped"; exit 1; }
+            if curl -s --connect-timeout 5 -o /dev/null https://example.com; then echo "example.com reachable"; exit 1; fi
+            if dig +short +time=3 +tries=1 @1.1.1.1 example.com > /dev/null 2>&1; then echo "direct DNS open (xt_owner missing on runner?)"; fi
+            curl -fsS --connect-timeout 10 -o /dev/null https://registry.npmjs.org/
+            claude --version
+            gh --version | head -1
+            go version
+            uv --version
+            ruff --version
+            command -v bb pre-commit ty rumdl
+          '

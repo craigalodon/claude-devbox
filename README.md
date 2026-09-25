@@ -207,6 +207,14 @@ cd / && sudo -u dev bash -c 'tok=$(sed -E "s|.*x-token-auth:([^@]+)@.*|\1|" ~/sa
 - credential paths
 - anything listed in your `local/forbidden-strings`
 
+CI (`.github/workflows/ci.yml`) runs on every push and PR, plus weekly:
+- shellcheck and the secret check
+- a render with the example config
+- an image build with a firewall and tooling smoke test
+
+The weekly run catches breakage from upstream tools, since the image always fetches their latest versions.
+Dependabot keeps the pinned actions current.
+
 Issues and PRs are welcome.
 
 ## Credits

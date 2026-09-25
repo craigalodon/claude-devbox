@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # lib/common.sh — shared by install-dev.sh and install-host.sh (sourced, not executed).
 #
 # Per-machine values live in devbox.conf (gitignored; copy devbox.conf.example). Repo files may contain
