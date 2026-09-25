@@ -54,6 +54,10 @@ prompt-injected it) doing damage outside its project, including:
 **What it does not protect against:**
 - **Exfiltration through allowlisted services.** github.com, npm, PyPI and friends accept uploads, and the sandbox
   can push to any repo its token allows. Use fine-grained, single-repo tokens, and add domains sparingly.
+- **Merging its own work.** A fine-grained token acts as you, and a token that can push branches can also merge
+  PRs. GitHub rulesets can't tell your pushes from the token's. Requiring PRs for `main` with no bypass stops
+  direct pushes, and the global `CLAUDE.md` tells sessions never to merge, but only a separate GitHub identity
+  for the sandbox (a machine user or GitHub App, left out of any bypass list) *enforces* that.
 - **The sandbox's own credentials.** The sandboxed Claude can read its project's GitHub token and Bitbucket
   token. That's inherent, since it needs them to push. Scope each token to that project's repo. Other projects'
   tokens are never mounted.
