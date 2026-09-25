@@ -1,0 +1,11 @@
+# Per-machine settings and extras (see devbox.conf.example, local/README.md)
+devbox.conf
+local/*
+!local/README.md
+
+# Guard rails: credentials never live in this repo (see scripts/check-secrets.sh)
+bb-credentials/
+gh-config/
+.credentials.json
+.claude.json
+*.log

@@ -1,0 +1,48 @@
+{
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
+    "enableWeakerNestedSandbox": true,
+    "network": {
+      "strictAllowlist": true,
+      "allowedDomains": [
+        "api.anthropic.com",
+        "claude.ai",
+        "claude.com",
+        "platform.claude.com",
+        "downloads.claude.ai",
+        "mcp-proxy.anthropic.com",
+        "code.claude.com",
+        "statsig.com",
+        "sentry.io",
+        "github.com",
+        "*.github.com",
+        "*.githubusercontent.com",
+        "registry.npmjs.org",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "proxy.golang.org",
+        "sum.golang.org",
+        "go.dev",
+        "storage.googleapis.com",
+        "releases.astral.sh",
+        "bitbucket.org",
+        "*.bitbucket.org"
+      ]
+    },
+    "filesystem": {
+      "denyRead": [
+        "~/.claude/.credentials.json"
+      ],
+      "allowWrite": [
+        "~/.cache",
+        "~/.local/share/uv",
+        "~/.local/state",
+        "~/go",
+        "~/.npm",
+        "~/.config/gh"
+      ]
+    }
+  }
+}

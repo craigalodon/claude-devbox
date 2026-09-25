@@ -1,0 +1,28 @@
+# devbox.conf — per-machine settings. Copy to devbox.conf (gitignored) and edit.
+
+# Your own login. It can act as SANDBOX_USER without a password (never the reverse).
+ADMIN_USER=alice
+
+# Unprivileged user that owns and runs the sandboxes. Created by install-host.sh if missing.
+SANDBOX_USER=dev
+
+# Start of the subordinate uid/gid range for SANDBOX_USER (rootless podman), used only if the
+# user has no /etc/subuid entry yet. The range is 65536 ids long.
+SUBID_START=165536
+
+# Git identity for commits made inside the sandbox. A GitHub no-reply address
+# (<id>+<login>@users.noreply.github.com) avoids GitHub's email-privacy push rejections.
+GIT_NAME="Alice Example"
+GIT_EMAIL=alice@example.com
+
+# Extra domains for the image's egress firewall, space-separated; each covers its subdomains.
+# Also add them to sandbox.network.allowedDomains in local/claude-settings.json.
+EXTRA_DOMAINS=""
+
+# 1 = install host/etc/ssh/sshd_config.d/60-hardening.conf: key-only auth, no root login, and
+#     AllowUsers ADMIN_USER SANDBOX_USER — every other account loses SSH access.
+SSH_HARDENING=1
+
+# 1 = this is a laptop used as a lid-closed server: ignore the lid switch and mask
+#     sleep/suspend/hibernate so it never goes to sleep.
+LAPTOP_SERVER=0

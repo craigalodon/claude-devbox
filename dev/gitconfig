@@ -1,0 +1,17 @@
+[user]
+	name = @GIT_NAME@
+	email = @GIT_EMAIL@
+[init]
+	defaultBranch = main
+[credential "https://github.com"]
+	helper = 
+	helper = !gh auth git-credential
+[credential "https://gist.github.com"]
+	helper = 
+	helper = !gh auth git-credential
+[http]
+	proxyAuthMethod = basic
+[credential "https://bitbucket.org"]
+	helper = 
+	helper = "!f() { test \"$1\" = get && git credential-store --file /home/node/.config/bitbucket/credentials get; }; f"
+	useHttpPath = true

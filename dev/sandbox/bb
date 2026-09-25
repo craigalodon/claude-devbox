@@ -1,0 +1,29 @@
+#!/bin/bash
+# bb — minimal Bitbucket Cloud REST client for the current repo (Bitbucket has no `gh`).
+# Token comes from git's credential helper (per-repo access token), so nothing extra to configure.
+#
+#   bb <METHOD> <path> [json-body]      path is relative to /2.0/repositories/<workspace>/<repo>/
+#
+#   bb GET  pullrequests                                   list open PRs
+#   bb GET  pullrequests/42                                show PR 42
+#   bb GET  pullrequests/42/diff                           PR diff
+#   bb GET  pullrequests/42/comments                       PR comments
+#   bb POST pullrequests '{"title":"...","description":"...","source":{"branch":{"name":"feat"}},
+#                          "destination":{"branch":{"name":"main"}},"close_source_branch":true}'
+#   bb POST pullrequests/42/comments '{"content":{"raw":"..."}}'
+set -euo pipefail
+[ $# -ge 2 ] || { sed -n '2,13p' "$0"; exit 1; }
+method="$1" path="${2#/}" body="${3:-}"
+
+url=$(git remote get-url origin)
+[[ "$url" =~ bitbucket\.org[:/]([^/]+)/([^/]+)$ ]] || { echo "origin is not a bitbucket.org repo: $url" >&2; exit 1; }
+ws="${BASH_REMATCH[1]}" repo="${BASH_REMATCH[2]%.git}"
+
+token=$(printf 'protocol=https\nhost=bitbucket.org\npath=%s/%s.git\n\n' "$ws" "$repo" \
+        | GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null | sed -n 's/^password=//p')
+[ -n "$token" ] || { echo "no Bitbucket token for $ws/$repo in the git credential store" >&2; exit 1; }
+
+args=(-sS --fail-with-body -X "$method" -H "Authorization: Bearer $token" -H "Accept: application/json")
+[ -n "$body" ] && args+=(-H "Content-Type: application/json" --data "$body")
+curl "${args[@]}" "https://api.bitbucket.org/2.0/repositories/$ws/$repo/$path"
+echo

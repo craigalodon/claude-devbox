@@ -1,0 +1,79 @@
+#!/bin/bash
+# claude-dev — run Claude Code inside a rootless-podman sandbox with an egress allowlist.
+#
+#   claude-dev build                     (re)build the sandbox image
+#   claude-dev login                     one-time: sign in to claude.ai inside the sandbox
+#   claude-dev up   <project-dir> [name] start a Remote Control server for <project-dir> in a tmux session
+#   claude-dev shell <project-dir>       interactive shell in the sandbox for <project-dir>
+#   claude-dev ls                        list sandboxes
+#   claude-dev attach <name>             attach to a sandbox's tmux session (Ctrl-b d to detach)
+#   claude-dev down <name>               stop a sandbox
+#
+# Env: CLAUDE_DEV_MODE   permission mode for `up` (default: acceptEdits; e.g. bypassPermissions)
+#      CLAUDE_DEV_SPAWN  where remote-spawned sessions run: worktree (default) or same-dir
+set -euo pipefail
+SANDBOX_DIR="$HOME/sandbox"
+IMAGE="localhost/claude-sandbox:latest"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# tmux needs a terminfo entry for $TERM; fall back if the client terminal (e.g. ghostty) is unknown here
+infocmp "${TERM:-dumb}" >/dev/null 2>&1 || export TERM=xterm-256color
+
+usage() { sed -n '2,14p' "$0"; exit 1; }
+
+run_container() {  # run_container <project> <name> <cmd...>
+  local project="$1" name="$2"; shift 2
+  [ -d "$project" ] || { echo "not a directory: $project" >&2; exit 1; }
+  mkdir -p "$SANDBOX_DIR/claude-home" "$SANDBOX_DIR/history" "$SANDBOX_DIR/gh-config" "$SANDBOX_DIR/cache" "$SANDBOX_DIR/uv-share" "$SANDBOX_DIR/go" "$SANDBOX_DIR/bb-credentials"
+  podman run --rm -it --name "$name" --hostname "$name" \
+    --userns=keep-id:uid=1000,gid=1000 \
+    --cap-add NET_ADMIN --cap-add NET_RAW \
+    -v "$project":/workspace \
+    -v "$SANDBOX_DIR/claude-home":/home/node/.claude \
+    -v "$SANDBOX_DIR/history":/commandhistory \
+    -v "$SANDBOX_DIR/gh-config":/home/node/.config/gh \
+    -v "$SANDBOX_DIR/bb-credentials":/home/node/.config/bitbucket:ro \
+    -v "$SANDBOX_DIR/cache":/home/node/.cache \
+    -v "$SANDBOX_DIR/uv-share":/home/node/.local/share/uv \
+    -v "$SANDBOX_DIR/go":/home/node/go \
+    -v "$HOME/.gitconfig":/home/node/.gitconfig:ro \
+    -e TZ="${TZ:-Etc/UTC}" \
+    -e NODE_OPTIONS=--max-old-space-size=4096 \
+    -w /workspace \
+    "$IMAGE" "$@"
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  build)
+    podman build -t "$IMAGE" --build-arg TZ="${TZ:-Etc/UTC}" "$SANDBOX_DIR" ;;
+  login)
+    mkdir -p "$SANDBOX_DIR/scratch"
+    echo ">> In Claude, run /login and follow the URL. Then /exit."
+    run_container "$SANDBOX_DIR/scratch" cc-login claude ;;
+  up)
+    project=$(realpath "${1:?project dir required}"); name="${2:-cc-$(basename "$project")}"
+    mode="${CLAUDE_DEV_MODE:-acceptEdits}"; spawn="${CLAUDE_DEV_SPAWN:-worktree}"
+    if tmux has-session -t "$name" 2>/dev/null; then echo "tmux session $name already exists (claude-dev attach $name)"; exit 1; fi
+    # remote-control refuses to start until the /workspace trust dialog has been accepted once
+    if ! python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("projects",{}).get("/workspace",{}).get("hasTrustDialogAccepted") else 1)' \
+         "$SANDBOX_DIR/claude-home/.claude.json" 2>/dev/null; then
+      echo ">> First run: accept the workspace trust dialog in Claude, then /exit to continue."
+      run_container "$project" "$name-trust" claude
+    fi
+    tmux new-session -d -s "$name" \
+      "$0 _run '$project' '$name' claude remote-control --name '$name' --permission-mode '$mode' --spawn='$spawn' --sandbox; echo; echo '[sandbox exited — press Enter to close]'; read"
+    echo "started sandbox '$name' for $project (mode: $mode, spawn: $spawn)"
+    echo "  watch:  claude-dev attach $name      stop: claude-dev down $name"
+    echo "  session will appear at https://claude.ai/code once connected" ;;
+  _run) run_container "$1" "$2" "${@:3}" ;;
+  shell)
+    project=$(realpath "${1:?project dir required}"); run_container "$project" "cc-shell-$$" bash ;;
+  ls)
+    echo "== containers =="; podman ps --format 'table {{.Names}}\t{{.Status}}\t{{.Mounts}}'
+    echo "== tmux =="; tmux ls 2>/dev/null || echo "(none)" ;;
+  attach) tmux attach -t "${1:?name required}" ;;
+  down)
+    name="${1:?name required}"; podman stop -t 10 "$name" 2>/dev/null || true
+    tmux kill-session -t "$name" 2>/dev/null || true; echo "stopped $name" ;;
+  *) usage ;;
+esac

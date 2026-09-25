@@ -1,0 +1,80 @@
+# Sandbox image for Claude Code. Built by `claude-dev build` (rootless podman, as the sandbox user).
+#
+# The base image's `node` user (uid 1000) runs everything; claude-dev maps it onto the sandbox user
+# with --userns=keep-id. Root inside the container is used only by init-firewall.sh, via one sudo rule.
+FROM docker.io/library/node:22-bookworm
+
+ARG TZ=Etc/UTC
+ARG CLAUDE_CODE_VERSION=latest
+ENV TZ=$TZ
+
+# --- system packages
+#   firewall:        iptables ipset dnsmasq-base iproute2 sudo
+#   Claude sandbox:  bubblewrap socat
+#   dev tooling:     the rest
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      iptables ipset dnsmasq-base iproute2 sudo \
+      bubblewrap socat \
+      ca-certificates curl git openssh-client jq dnsutils procps less man-db unzip \
+      nano vim tmux ripgrep fd-find fzf sqlite3 \
+      build-essential python3 python3-pip python3-venv \
+ && rm -rf /var/lib/apt/lists/*
+
+# --- GitHub CLI, from GitHub's own apt repository (Debian's package lags far behind)
+RUN install -d -m 755 /etc/apt/keyrings \
+ && curl -fsSL -o /etc/apt/keyrings/github-cli.gpg https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/github-cli.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update && apt-get install -y --no-install-recommends gh \
+ && rm -rf /var/lib/apt/lists/*
+
+# --- Go: newest stable release at build time
+RUN version=$(curl -fsSL 'https://go.dev/dl/?mode=json' | jq -r 'map(select(.stable))[0].version') \
+ && curl -fsSL "https://go.dev/dl/${version}.linux-$(dpkg --print-architecture).tar.gz" | tar -xz -C /usr/local
+
+# --- uv, plus Python dev tools installed system-wide. UV_TOOL_DIR is set for this step only: if it
+#     leaked into the runtime environment, `uvx` would try to write into the read-only tool dir.
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+ && for tool in pre-commit ruff ty rumdl; do \
+      UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install "$tool"; \
+    done \
+ && chmod -R a+rX /opt/uv-tools
+
+# --- GitHub's SSH host keys, taken from its API over TLS rather than trusted on first use
+RUN curl -fsSL https://api.github.com/meta | jq -r '.ssh_keys[] | "github.com " + .' > /etc/ssh/ssh_known_hosts
+
+# --- directories the node user owns; most are bind-mounted from the host by claude-dev
+RUN install -d -o node -g node /opt/npm-global /workspace /commandhistory \
+ && install -d -o node -g node -m 700 /home/node/.ssh \
+ && cd /home/node && install -d -o node -g node .claude .cache .local .local/share .local/share/uv go \
+      .config .config/gh .config/bitbucket \
+ && install -o node -g node -m 600 /dev/null /commandhistory/.bash_history
+
+ENV PATH=/opt/npm-global/bin:/usr/local/go/bin:/home/node/go/bin:$PATH \
+    NPM_CONFIG_PREFIX=/opt/npm-global \
+    CLAUDE_CONFIG_DIR=/home/node/.claude \
+    DISABLE_AUTOUPDATER=1 \
+    DEVCONTAINER=true \
+    EDITOR=nano VISUAL=nano \
+    HISTFILE=/commandhistory/.bash_history \
+    PROMPT_COMMAND='history -a'
+
+# --- Claude Code (updates come from rebuilding the image, not self-update)
+USER node
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" @anthropic-ai/sandbox-runtime
+
+# --- firewall, entrypoint, helpers. node may run exactly one thing as root: the firewall script.
+USER root
+COPY init-firewall.sh entrypoint.sh bb /usr/local/bin/
+COPY extra-domains /etc/sandbox/extra-domains
+RUN chmod 755 /usr/local/bin/init-firewall.sh /usr/local/bin/entrypoint.sh /usr/local/bin/bb \
+ && chmod 644 /etc/sandbox/extra-domains \
+ && echo 'node ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh' > /etc/sudoers.d/sandbox-firewall \
+ && chmod 440 /etc/sudoers.d/sandbox-firewall \
+ && visudo -cf /etc/sudoers.d/sandbox-firewall
+
+USER node
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["bash"]
